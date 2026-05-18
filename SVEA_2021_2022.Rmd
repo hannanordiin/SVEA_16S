@@ -1,0 +1,874 @@
+---
+title: "SVEA_2021_2022"
+date: "2026-04-27"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+    highlight: tango
+    code_folding: show
+  pdf_document:
+    toc: true
+---
+
+
+
+# Introduction
+
+This report presents the bioinformatic analysis of ASV data from the Swedish coastline. The analysis focuses on characterising microbial communities and investigating statistical differences among regions along the west, south, and east coasts of Sweden.
+
+
+# Data analysis
+
+
+## Part 1: Global setup and definitions
+
+The packages needed are loaded into R and output folders are set. In order to get the stations/locations around the coast in the right order from west to south to east, the stations are set in a specific order. 
+
+
+
+```{r setup}
+# 1. Define input and output directories
+inwd  <- "/Users/hannanordin/Documents/Masterarbete/R_data/dada2_result/"
+outwd <- "/Users/hannanordin/Documents/Masterarbete/R_data/R_outputs/"
+
+
+# Set working directory for knitting (ensures reproducibility)
+knitr::opts_knit$set(root.dir = inwd)
+setwd(inwd)
+
+# Global chunk settings
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 7
+)
+
+# Load required packages for microbiome analysis and visualization
+library(tidyverse)
+library(phyloseq)
+library(vegan)
+library(ggrepel)
+library(RColorBrewer)
+
+
+# Define consistent ordering of sampling locations (west → south → east)
+location_order <- c("Släggö", "N14", "Anholt", "Å17", "BY2", "BY5", "BY15", "BY20", "BY38", "REFM1V1")
+
+
+# Generate color palette for locations
+my_colors <- colorRampPalette(brewer.pal(12, "Paired"))(length(location_order))
+names(my_colors) <- location_order
+```
+
+
+
+
+
+
+## Part 2: Import and cleaning
+
+In this step the ASV-tables, taxonomy and metadata are imported. Sequences originating from chloroplasts and mitochondria were removed to ensure that the analysis focused solely on the bacterial community. 
+
+
+
+```{r import_cleaning}
+
+### =========================================================================
+### DEL 2: IMPORT & CLEANING
+### =========================================================================
+
+# Import ASV count table (rows = ASVs, columns = samples)
+asv_table <- read.delim(paste0(inwd, "ASV_table.tsv"), header = TRUE, sep = "\t", row.names = 1)
+
+# Import taxonomic classification (SILVA database)
+taxonomy_silva <- read.delim(paste0(inwd, "ASV_tax_species.silva_138_2.tsv"), header = TRUE, sep = "\t", row.names = 1)
+
+# Import sample metadata (e.g. location, year)
+metadata_Master <- read.delim(paste0(inwd, "Metadata.tsv"), header = TRUE, sep = "\t", row.names = 1, fileEncoding = "UTF-8")
+
+# Import DNA sequences corresponding to each ASV
+asv_seq <- Biostrings::readDNAStringSet(paste0(inwd, "ASV_seqs.fasta"), format = "fasta")
+
+
+
+# Build a phyloseq object integrating ASV abundance data, taxonomy,
+# sample metadata, and DNA sequences. This unified object ensures that
+# all components are consistently linked and enables streamlined
+# downstream ecological and statistical analyses.
+
+ps <- phyloseq(otu_table(asv_table, taxa_are_rows = TRUE), 
+               tax_table(as.matrix(taxonomy_silva)), 
+               sample_data(metadata_Master), refseq(asv_seq))
+
+# Remove non-bacterial sequences (mitochondria and chloroplast contamination)
+ps_all <- subset_taxa(ps, Family != "Mitochondria" & Order != "Chloroplast")
+
+# Prepare and standardize metadata
+sd_all <- data.frame(sample_data(ps_all))
+
+# Ensure correct ordering of locations
+sd_all$Location <- factor(sd_all$Location, levels = location_order)
+
+# Define broader geographic regions
+sd_all$Region <- ifelse(sd_all$Location %in% c("Släggö", "N14", "Anholt", "Å17"), "West",
+                        ifelse(sd_all$Location %in% c("BY2", "BY5"), "South", "East"))
+sample_data(ps_all) <- sample_data(sd_all)
+
+
+
+```
+
+
+
+
+
+
+
+## Part 3: Diversity analysis - The total community 
+
+Rarefaction curves are used to assess sequencing depth and Shannon-index to measure the alpha diversity. 
+
+Alpha diversity:
+
+* Observed Richness: The most direct measure of diversity, representing the total count of unique ASVs (taxa) detected in each sample. It provides a baseline for community complexity.
+
+* Shannon Index (H′): A composite estimator that accounts for both richness and evenness. It reflects the "uncertainty" in predicting the identity of a random individual; higher values indicate a more diverse and balanced community.
+
+* Pielou’s Evenness (J): A measure of how equally the abundances are distributed among the species present. Values range from 0 to 1, where 1 indicates that all species are equally abundant, and lower values suggest dominance by a few taxa (e.g., during a Cyanobacterial bloom).
+
+* Inverse Simpson Index: Similar to Shannon but gives more weight to the most dominant species. It represents the probability that two randomly selected individuals belong to the same species.
+
+
+Multiple indices were used to characterize alpha diversity to capture different aspects of community structure: Observed Richness for total taxonomic count, Pielou’s Evenness for abundance distribution, and the Shannon index to integrate both metrics.
+
+
+
+
+```{r rarefaction_all}
+
+
+### =========================================================================
+### PART 3: ANALYSIS - TOTAL BACTERIAL COMMUNITY (All Taxa)
+### =========================================================================
+
+# --- 1. Rarefaction of all bacteria ---
+
+# Convert OTU table to matrix format
+otu_all <- as(otu_table(ps_all), "matrix")
+
+# Ensure samples are rows for vegan compatibility
+if (taxa_are_rows(ps_all)) { otu_all <- t(otu_all) }
+
+# Generate rarefaction curves to assess sequencing depth
+rare_data_all <- vegan::rarecurve(otu_all, step = 100, tidy = TRUE)
+
+# Merge rarefaction data with metadata
+rare_df_all <- rare_data_all %>%
+  left_join(data.frame(sample_data(ps_all)) %>% mutate(Site = rownames(.)), by = "Site")
+
+# Plot rarefaction curves
+p_rare_all <- ggplot(rare_df_all, aes(x = Sample, y = Species, group = Site, color = Region)) +
+  geom_line(alpha = 0.5) +
+  geom_vline(xintercept = min(sample_sums(ps_all)), linetype = "dashed") +
+  theme_classic() +
+  labs(title = "Rarefaction: All Bacteria (minus debris)", x = "Sequencing Depth", y = "ASVs")
+
+ggsave(p_rare_all, filename = paste0(outwd, "Rarefaction_allbacteria.pdf"), width = 12, height = 7)
+
+print(p_rare_all)
+
+```
+
+
+
+```{r alpha_diversity_all}
+
+# --- 2. Alpha diversity: total bacterial community (Manual Stats) ---
+
+set.seed(123)
+ps_all_rare <- rarefy_even_depth(ps_all, replace = FALSE, verbose = FALSE)
+
+# Calculate indices
+alpha_measures_all <- estimate_richness(ps_all_rare, measures = c("Observed", "Shannon"))
+alpha_measures_all$Evenness <- alpha_measures_all$Shannon / log(alpha_measures_all$Observed)
+alpha_all <- data.frame(sample_data(ps_all_rare), alpha_measures_all)
+
+# STEP 1: Calculate Kruskal-Wallis p-values manually for each metric
+kw_obs <- kruskal.test(Observed ~ Region, data = alpha_all)$p.value
+kw_sha <- kruskal.test(Shannon ~ Region, data = alpha_all)$p.value
+kw_eve <- kruskal.test(Evenness ~ Region, data = alpha_all)$p.value
+
+# Create a small data frame to hold these p-values for the plot
+stats_labels <- data.frame(
+  Metric = c("Observed", "Shannon", "Evenness"),
+  label = c(paste0("p = ", round(kw_obs, 4)), 
+            paste0("p = ", round(kw_sha, 4)), 
+            paste0("p = ", round(kw_eve, 4)))
+)
+
+# STEP 2: Reshape data for plotting
+alpha_all_long <- alpha_all %>%
+  pivot_longer(cols = c("Observed", "Shannon", "Evenness"), 
+               names_to = "Metric", values_to = "Value")
+
+# STEP 3: Visualize (using geom_text instead of ggpubr)
+p_alpha_total_comp <- ggplot(alpha_all_long, aes(x = Region, y = Value, fill = Region)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 1.5, alpha = 0.5) +
+  facet_wrap(~Metric, scales = "free_y", ncol = 1) +
+  scale_fill_manual(values = c("West" = "blue", "South" = "green", "East" = "red")) +
+  theme_bw() +
+  # Add the p-values manually to the top right of each facet
+  geom_text(data = stats_labels, aes(x = Inf, y = Inf, label = label), 
+            hjust = 1.1, vjust = 1.5, inherit.aes = FALSE, size = 3.5, fontface = "italic") +
+  labs(title = "Total Bacterial Alpha Diversity", 
+       subtitle = "Kruskal-Wallis rank sum test performed for each metric",
+       y = "Index Value")
+
+ggsave(p_alpha_total_comp, filename = paste0(outwd, "Alpha_Comp_Total_ManualStats.pdf"), width = 8, height = 10)
+
+print(p_alpha_total_comp)
+
+
+
+
+
+
+# --- 2. Alpha diversity: total bacterial community ---
+
+# Rarefy samples to even sequencing depth for fair diversity comparison
+set.seed(123)
+ps_all_rare <- rarefy_even_depth(ps_all, replace = FALSE)
+
+# Calculate Shannon diversity index (accounts for richness and evenness)
+alpha_old <- data.frame(sample_data(ps_all_rare), estimate_richness(ps_all_rare, measures = "Shannon"))
+
+# Visualize alpha diversity across locations
+p_alpha_total <- ggplot(alpha_old, aes(x = Location, y = Shannon, fill = Location)) +
+  annotate("rect", xmin = 0.5, xmax = 4.5, ymin = -Inf, ymax = Inf, alpha = 0.1, fill = "blue") + 
+  annotate("rect", xmin = 4.5, xmax = 6.5, ymin = -Inf, ymax = Inf, alpha = 0.1, fill = "green") +
+  annotate("rect", xmin = 6.5, xmax = 10.5, ymin = -Inf, ymax = Inf, alpha = 0.1, fill = "red") +
+  geom_boxplot(alpha = 0.8, color = "black", outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 2, alpha = 0.7) +
+  scale_fill_manual(values = my_colors) + theme_bw() +
+  labs(title = "Total Bacterial Diversity (All Taxa)", subtitle = "Every station included") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(p_alpha_total, filename = paste0(outwd, "Alpha_diversity_regions_allbacteria.pdf"), width = 12, height = 7)
+
+print(p_alpha_total)
+
+
+```
+
+
+### Statistical Significance Testing (Alpha Diversity) - All bacteria 
+
+Below are the detailed results of the Kruskal-Wallis rank sum tests, used to evaluate if the differences in alpha diversity observed between the West, South, and East regions are statistically significant.
+
+
+
+```{r alpha_stats_detailed}
+# Kruskal-Wallis results for the total bacterial community
+cat("--- KRUSKAL-WALLIS RESULTS: TOTAL COMMUNITY ---\n")
+print(kruskal.test(Observed ~ Region, data = alpha_all))
+print(kruskal.test(Shannon ~ Region, data = alpha_all))
+print(kruskal.test(Evenness ~ Region, data = alpha_all))
+
+
+```
+
+
+
+
+
+
+Beta diversity (Aitchison Distance)
+
+To compare community structure between samples, Aitchison distance was used (RCLR transformation followed by Euclidean distance). This approach is based on recommendations from Gloor et al. (2017) for handling compositional microbiome data.
+
+The Aitchison method is based on log-ratios between taxa, meaning that differences are evaluated in terms of relative abundances rather than absolute counts. This ensures that all taxa contribute to the analysis, including low-abundance groups whose proportional changes may be biologically relevant. 
+
+
+```{r beta_diversity_all}
+
+
+##### Aitchison distance plot 
+
+# --- BETA 1: Full community (Aitchison / Gloor method) ---
+
+# Extract count matrix
+otu_mat <- as(otu_table(ps_all), "matrix")
+if (taxa_are_rows(ps_all)) { otu_mat <- t(otu_mat) }
+
+
+# Apply RCLR transformation (handles compositional data and zeros)
+ps_rclr <- vegan::decostand(otu_mat, method = "rclr")
+
+
+# Compute Aitchison distance (Euclidean distance on log-ratio data)
+dist_aitchison <- vegan::vegdist(ps_rclr, method = "euclidean")
+
+# Perform ordination (PCoA)
+ord_aitchison <- ordinate(ps_all, method = "PCoA", distance = dist_aitchison)
+
+# Test for differences between regions using PERMANOVA
+permanova_aitchison <- vegan::adonis2(dist_aitchison ~ Region, 
+                                      data = data.frame(sample_data(ps_all)))
+
+# Plot ordination
+p_pcoa_aitchison <- plot_ordination(ps_all, ord_aitchison, color = "Location") +
+  geom_point(size = 5, alpha = 0.7) +
+  stat_ellipse(aes(group = Region, color = Region), linetype = 2) +
+  scale_color_manual(values = c(my_colors, "West" = "blue", "South" = "green", "East" = "red"),
+                     breaks = c(location_order, "West", "South", "East")) +
+  theme_bw() +
+  labs(title = "PCoA: Aitchison Distance (Compositional)",
+       subtitle = "RCLR-transformed data | No rarefaction",
+       caption = paste("PERMANOVA R2 =", round(permanova_aitchison$R2[1], 2), 
+                       "(p =", permanova_aitchison$`Pr(>F)`[1], ")"))
+
+print(p_pcoa_aitchison)
+
+ggsave(p_pcoa_aitchison, filename = paste0(outwd, "Beta_PCoA_Aitchison.pdf"), width = 10, height = 7)
+
+
+
+```
+
+
+
+
+
+
+
+
+
+## Part 4: Diversity analysis – cyanobacterial community
+
+The same analytical framework as described for the total community was applied to the cyanobacterial subset.
+
+This part is focused on the phyla Cyanobacteriota. The internal structure and dominance patterns are analysed separately, as cyanobacteria play a central role in the ecology in marine waters.
+
+
+```{r cyano_setup}
+
+
+
+
+### =========================================================================
+### PART 4: ANALYSIS - CYANOBACTERIA
+### =========================================================================
+
+# --- Rarefaction cyanobacteria ---
+
+# 1. Create Cyanobacteria subset
+ps_cyano <- subset_taxa(ps_all, Phylum == "Cyanobacteriota")
+
+# 2. Rarefaction
+# Create a rarefied dataset for fair diversity comparison
+ps_cyano_rare <- rarefy_even_depth(ps_cyano, replace = FALSE, rngseed = 12345)
+
+```
+
+
+
+```{r cyano_rarefaction}
+
+# 3. Rarefaction Curves
+otu_tab_cy <- as(otu_table(ps_cyano), "matrix")
+if (taxa_are_rows(ps_cyano)) { otu_tab_cy <- t(otu_tab_cy) }
+rare_data_cy <- vegan::rarecurve(otu_tab_cy, step = 50, tidy = TRUE)
+rare_df_cy <- rare_data_cy %>% left_join(data.frame(sample_data(ps_cyano)) %>% mutate(Site = rownames(.)), by = "Site")
+label_data_cy <- rare_df_cy %>% group_by(Site) %>% filter(Sample == max(Sample))
+
+
+p_rare_labels <- ggplot(rare_df_cy, aes(x = Sample, y = Species, group = Site, color = Region)) +
+  geom_line(alpha = 0.5, size = 0.5) + 
+  geom_text_repel(data = label_data_cy, aes(label = Site), size = 2.5, nudge_x = 500, direction = "y", hjust = 0, max.overlaps = 15) +
+  scale_color_brewer(palette = "Set1") + 
+  geom_vline(xintercept = min(sample_sums(ps_cyano)), linetype = "dashed", color = "red") +
+  theme_classic() + scale_x_continuous(expand = expansion(mult = c(0, 0.2))) + 
+  labs(title = "Rarefaction Curves: Cyanobacteriota")
+
+ggsave(p_rare_labels, filename = paste0(outwd, "Rarefaction_with_region_Names.pdf"), width = 12, height = 7)
+
+print(p_rare_labels)
+
+```
+
+
+
+```{r cyano_alpha}
+
+
+# --- Alpha diversity: Cyanobacteria (Manual stats) ---
+
+# Create the object and alculate Observed, Shannon och Evenness for Cyano
+alpha_meas_cy <- estimate_richness(ps_cyano_rare, measures = c("Observed", "Shannon"))
+alpha_meas_cy$Evenness <- alpha_meas_cy$Shannon / log(alpha_meas_cy$Observed)
+alpha_cy_stats <- data.frame(sample_data(ps_cyano_rare), alpha_meas_cy)
+
+# STEP 1: Calculate Kruskal-Wallis p-values for Cyanobacteria metrics
+# We use alpha_cy_stats which you created earlier for the Cyano subset
+kw_obs_cy <- kruskal.test(Observed ~ Region, data = alpha_cy_stats)$p.value
+kw_sha_cy <- kruskal.test(Shannon ~ Region, data = alpha_cy_stats)$p.value
+kw_eve_cy <- kruskal.test(Evenness ~ Region, data = alpha_cy_stats)$p.value
+
+# Create labels for the facets
+stats_labels_cy <- data.frame(
+  Metric = c("Observed", "Shannon", "Evenness"),
+  label = c(paste0("p = ", round(kw_obs_cy, 4)), 
+            paste0("p = ", round(kw_sha_cy, 4)), 
+            paste0("p = ", round(kw_eve_cy, 4)))
+)
+
+# STEP 2: Reshape Cyano data for multi-panel plotting
+alpha_cy_long <- alpha_cy_stats %>%
+  pivot_longer(cols = c("Observed", "Shannon", "Evenness"), 
+               names_to = "Metric", values_to = "Value")
+
+# STEP 3: Create the regional comparison plot with statistics
+p_alpha_cyano_stats <- ggplot(alpha_cy_long, aes(x = Region, y = Value, fill = Region)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 1.5, alpha = 0.5) +
+  facet_wrap(~Metric, scales = "free_y", ncol = 1) +
+  scale_fill_manual(values = c("West" = "blue", "South" = "green", "East" = "red")) +
+  theme_bw() +
+  # Adding p-values manually to each panel
+  geom_text(data = stats_labels_cy, aes(x = Inf, y = Inf, label = label), 
+            hjust = 1.1, vjust = 1.5, inherit.aes = FALSE, size = 3.5, fontface = "italic") +
+  labs(title = "Cyanobacterial Alpha Diversity - Regional Comparison",
+       subtitle = "Kruskal-Wallis rank sum test (Cyano-specific data)",
+       y = "Index Value")
+
+# Save the plot
+ggsave(p_alpha_cyano_stats, filename = paste0(outwd, "Alpha_Comp_Cyano_ManualStats.pdf"), width = 8, height = 10)
+
+print(p_alpha_cyano_stats)
+
+
+
+
+
+# --- Alpha diversity plot
+
+# 4. Alpha diversity (Shannon)
+alpha_cy <- data.frame(sample_data(ps_cyano_rare), estimate_richness(ps_cyano_rare, measures = "Shannon"))
+
+# Define groups and positions for region-based background shading in the boxplot
+alpha_cy$Location <- factor(alpha_cy$Location, levels = location_order)
+present_locations <- levels(droplevels(alpha_cy$Location))
+west_list  <- c("Släggö", "N14", "Anholt", "Å17"); south_list <- c("BY2", "BY5"); east_list  <- c("BY15", "BY20", "BY38", "REFM1V1")
+
+# Identify the positions of each geographic region along the x-axis
+# (based on the ordered factor levels of Location)
+west_pos  <- which(present_locations %in% west_list)
+south_pos <- which(present_locations %in% south_list)
+east_pos  <- which(present_locations %in% east_list)
+
+p_alpha_cyano_final <- ggplot(alpha_cy, aes(x = Location, y = Shannon, fill = Location)) +
+
+  # Add shaded background regions to visually group stations by geographic region
+  # Rectangles span all stations belonging to each region
+  {if(length(west_pos) > 0) 
+    annotate("rect",
+             xmin = min(west_pos) - 0.5,
+             xmax = max(west_pos) + 0.5,
+             ymin = -Inf, ymax = Inf,
+             alpha = 0.1, fill = "blue")} +
+
+  {if(length(south_pos) > 0) 
+    annotate("rect",
+             xmin = min(south_pos) - 0.5,
+             xmax = max(south_pos) + 0.5,
+             ymin = -Inf, ymax = Inf,
+             alpha = 0.1, fill = "green")} +
+
+  {if(length(east_pos) > 0) 
+    annotate("rect",
+             xmin = min(east_pos) - 0.5,
+             xmax = max(east_pos) + 0.5,
+             ymin = -Inf, ymax = Inf,
+             alpha = 0.1, fill = "red")} +
+
+  # Plot alpha diversity distributions per station
+  geom_boxplot(alpha = 0.8, color = "black", outlier.shape = NA) +
+
+  # Overlay individual samples
+  geom_jitter(width = 0.1, size = 2.5, shape = 21, color = "black", alpha = 0.8) +
+
+  # Apply consistent color palette
+  scale_fill_manual(values = my_colors) + 
+
+  theme_bw() +
+  labs(title = "Cyanobacterial Alpha Diversity",
+       subtitle = "West (blue), South (green), East (red)",
+       y = "Shannon Index (H')",
+       x = "Station") +
+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, face = "bold"),
+        legend.position = "right")
+
+ggsave(p_alpha_cyano_final, filename = paste0(outwd, "Alpha_diversity_regions_cyanobacteria.pdf"), width = 12, height = 7)
+
+print(p_alpha_cyano_final)
+
+
+```
+
+
+
+### Statistical Significance Testing (Alpha Diversity) - Cyanobacteria
+
+
+```{r alpha_stats_detailed_cyano}
+
+cat("\n--- KRUSKAL-WALLIS RESULTS: CYANOBACTERIA ---\n")
+kruskal.test(Observed ~ Region, data = alpha_cy_stats)
+kruskal.test(Shannon ~ Region, data = alpha_cy_stats)
+
+```
+
+
+
+
+
+
+```{r cyano_beta}
+
+# --- BETA 2: Cyanobacteria (Aitchison / compositional approach) ---
+
+# 1. Prepare count matrix for Cyanobacteria (use ps_cyano, not ps_cyano_rare)
+otu_cy_mat <- as(otu_table(ps_cyano), "matrix")
+if (taxa_are_rows(ps_cyano)) { otu_cy_mat <- t(otu_cy_mat) }
+
+# 2. Apply RCLR transformation (Robust Centered Log-Ratio)
+# This transformation accounts for compositional data structure and allows
+# comparison between samples with different sequencing depths
+ps_cyano_rclr <- vegan::decostand(otu_cy_mat, method = "rclr")
+
+# 3. Compute distance matrix (Aitchison distance)
+dist_cy_aitchison <- vegan::vegdist(ps_cyano_rclr, method = "euclidean")
+
+# 4. Perform ordination (PCoA) based on Aitchison distance
+ord_cy_aitchison <- ordinate(ps_cyano, method = "PCoA", distance = dist_cy_aitchison)
+
+# 5. Test for differences between regions using PERMANOVA
+permanova_cy_aitchison <- vegan::adonis2(dist_cy_aitchison ~ Region, 
+                                         data = data.frame(sample_data(ps_cyano)))
+
+# 6. Plot ordination
+p_pcoa_cy_aitchison <- plot_ordination(ps_cyano, ord_cy_aitchison, color = "Location") +
+  geom_point(size = 5, alpha = 0.7) +
+  stat_ellipse(aes(group = Region, color = Region), linetype = 2, linewidth = 1) + 
+  scale_color_manual(values = c(my_colors, "West" = "blue", "South" = "green", "East" = "red"),
+                     breaks = c(location_order, "West", "South", "East")) +
+  theme_bw() +
+  labs(title = "PCoA: Cyanobacterial Community Structure (Aitchison)",
+       subtitle = "Compositional analysis | RCLR-transformed",
+       caption = paste("PERMANOVA R² =", round(permanova_cy_aitchison$R2[1], 2), 
+                       "(p =", permanova_cy_aitchison$`Pr(>F)`[1], ")"))
+
+print(p_pcoa_cy_aitchison)
+
+# Save the plot
+ggsave(p_pcoa_cy_aitchison, filename = paste0(outwd, "Beta_PCoA_Cyano_Aitchison.pdf"),
+       width = 10, height = 7)
+
+```
+
+
+
+
+
+
+
+Create objects to the plots that will be created later: 
+
+
+```{r taxonomy_setup}
+
+
+######## PREPARATION CODE FOR TAXONOMIC PLOTS #########
+
+# Helper code: create objects required for downstream taxonomic bar plots
+# 1. For phylum-level plot
+ps_phylum <- tax_glom(ps_all, taxrank = "Phylum")
+ps_phylum_rel <- transform_sample_counts(ps_phylum, function(x) x / sum(x))
+
+# 2. For cyanobacteria plot
+ps_cyano_rel <- tax_glom(ps_cyano, taxrank = "Genus")
+ps_cyano_rel <- transform_sample_counts(ps_cyano_rel, function(x) x / sum(x))
+
+
+```
+
+
+
+
+
+## Part 5: Taxonomic composition 
+
+
+
+
+### Family level (Top 12).
+Visualisation of the most common groups in the community. 
+
+To obtain a more informative view, the analysis is performed at the family level. Now the different types of ecological functions can be studied. The 12 most common families are shown individually, while the rest is grouped as "Other Families". 
+
+
+
+```{r taxonomy_family}
+
+
+
+### =========================================================================
+### PART 5: TAXONOMY - FULL COMMUNITY (Family Level)
+### =========================================================================
+
+# 1. Aggregate data at family level
+ps_fam <- tax_glom(ps_all, taxrank = "Family")
+ps_fam_rel <- transform_sample_counts(ps_fam, function(x) x / sum(x))
+df_fam <- psmelt(ps_fam_rel)
+
+# 2. Identify the 12 most abundant families to simplify visualization
+top12_fam <- df_fam %>%
+  group_by(Family) %>%
+  summarise(mean_abund = mean(Abundance)) %>%
+  arrange(desc(mean_abund)) %>%
+  slice_head(n = 12) %>%
+  pull(Family)
+
+# 3. Group remaining families into "Other Families"
+df_fam$Family_Plot <- ifelse(df_fam$Family %in% top12_fam, as.character(df_fam$Family), "Other Families")
+
+
+# --- Summary of top 12 Families (Mean relative abundance) ---
+summary_top12 <- df_fam %>%
+  filter(Family_Plot != "Other Families") %>%
+  group_by(Phylum, Family) %>%
+  summarise(Mean_Abund_Pct = mean(Abundance) * 100, .groups = 'drop') %>%
+  arrange(desc(Mean_Abund_Pct))
+
+print(summary_top12)
+
+
+# 4. Set consistent ordering of locations
+tax_location_order <- c("Å17", "Släggö", "N14", "Anholt", "BY2", "BY5", "REFM1V1", "BY38", "BY15", "BY20")
+df_fam$Location <- factor(df_fam$Location, levels = tax_location_order)
+df_fam$Region <- factor(df_fam$Region, levels = c("West", "South", "East"))
+
+# 5. Plot
+p_tax_family <- ggplot(df_fam, aes(x = Sample, y = Abundance, fill = Family_Plot)) +
+  geom_bar(stat = "identity", position = "fill", color = "black", linewidth = 0.05) +
+  facet_grid(~Region + Location, scales = "free_x", space = "free") +  
+  scale_x_discrete(labels = setNames(as.character(df_fam$Year), df_fam$Sample)) +
+  scale_fill_manual(values = colorRampPalette(brewer.pal(12, "Paired"))(13)) +
+  theme_bw() +
+  labs(title = "Bacterial Composition: Family Level (Top 12)",
+       y = "Relative Proportion", x = "Year") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 6),
+        legend.text = element_text(size = 7))
+
+ggsave(p_tax_family, filename = paste0(outwd, "Taxonomy_Family_Top12.pdf"), width = 18, height = 9)
+
+print(p_tax_family)
+
+
+
+
+# Inspect which families are grouped as "Other Families"
+other_list <- df_fam %>%
+  filter(Family_Plot == "Other Families") %>%
+  group_by(Family) %>%
+  summarise(Total_Abundance = sum(Abundance)) %>%
+  arrange(desc(Total_Abundance))
+
+print(other_list)
+
+
+```
+
+
+
+
+
+
+
+
+### Genus level (Cyanobacteria)
+
+For further analysis of cyanobacteria, the genus level is studied to identify the dominance of for example Cyanobium and Nodularia. 
+
+```{r taxonomy_cyano_genus}
+
+
+
+### =========================================================================
+### PART 6: TAXONOMY - CYANOBACTERIA (Genus Level)
+### =========================================================================
+
+# 1. Prepare data and define ordering
+ps_cyano_gen <- tax_glom(ps_cyano_rel, taxrank = "Genus")
+df_cyano_gen <- psmelt(ps_cyano_gen)
+
+tax_location_order <- c("Å17", "Släggö", "N14", "Anholt", 
+                        "BY2", "BY5", "REFM1V1", "BY38", "BY15", "BY20")
+df_cyano_gen$Region <- ifelse(df_cyano_gen$Location %in% c("Å17", "Släggö", "N14", "Anholt"), "West",
+                              ifelse(df_cyano_gen$Location %in% c("BY2", "BY5"), "South", "East"))
+df_cyano_gen$Location <- factor(df_cyano_gen$Location, levels = tax_location_order)
+df_cyano_gen$Region <- factor(df_cyano_gen$Region, levels = c("West", "South", "East"))
+
+# 2. Clean and standardize genus names (Snowella correction)
+df_cyano_gen$Genus <- as.character(df_cyano_gen$Genus)
+df_cyano_gen$Genus[grepl("Snowella", df_cyano_gen$Genus)] <- "Snowella 0TU37S04"
+
+# 3. Define color palette for genera
+gen_colors <- c(
+  "Anabaena"                     = "#FF1493", # Pink 
+  "Aphanizomenon MDT14a"         = "#377EB8", # Blue
+  "Atelocyanobacterium (UCYN-A)" = "#984EA3", # Purple
+  "Candidatus Obscuribacter"     = "#F781BF", # Light pink
+  "Cyanobium PCC-6307"           = "#4DAF4A", # Green
+  "Cylindrospermopsis CRJ1"      = "#A65628", # Brown
+  "Dolichospermum"               = "#00FFFF", # Neon blue
+  "Nodularia PCC-9350"           = "#E41A1C", # Red
+  "Pseudanabaena PCC-7429"       = "#FF7F00", # Orange
+  "Rivularia PCC-7116"           = "#00008B", # Dark blue
+  "Snowella 0TU37S04"            = "#FFFF33", # Neon yellow
+  "Symphothece PCC-7002"         = "#00FF00", # Bright green
+  "Synechococcus CC9902"         = "#FFD700", # Gold
+  "Other Cyanobacteria"          = "#D3D3D3"  # Light grey
+)
+
+# 4. Match genera to defined color categories and convert to factor
+df_cyano_gen_pre_merge <- df_cyano_gen 
+df_cyano_gen$Genus[!(df_cyano_gen$Genus %in% names(gen_colors))] <- "Other Cyanobacteria"
+df_cyano_gen$Genus <- factor(df_cyano_gen$Genus, levels = names(gen_colors))
+
+
+# --- Summary of Cyanobacterial Genera (Internal Relative Abundance) ---
+summary_cyano_gen <- df_cyano_gen %>%
+  group_by(Genus) %>%
+  summarise(Mean_Abund_Pct = mean(Abundance) * 100, .groups = 'drop') %>%
+  arrange(desc(Mean_Abund_Pct))
+print(summary_cyano_gen)
+
+
+
+
+# 5. Plot
+p_tax_cyano_final_perfect <- ggplot(df_cyano_gen, aes(x = Sample, y = Abundance, fill = Genus)) +
+  geom_bar(stat = "identity", position = "fill", color = "black", linewidth = 0.05) +
+  facet_grid(~Region + Location, scales = "free_x", space = "free") + 
+  scale_x_discrete(labels = setNames(as.character(df_cyano_gen$Year), df_cyano_gen$Sample)) +
+  scale_fill_manual(values = gen_colors) + 
+  theme_bw() +
+  labs(title = "Cyanobacterial Community Composition",
+       subtitle = "Genus level | Stations ordered West to East | High-contrast",
+       y = "Relative Proportion", x = "Year") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 6),
+        strip.text = element_text(size = 7, face = "bold"),
+        legend.text = element_text(size = 7, face = "italic"),
+        legend.key.size = unit(0.3, "cm"))
+
+ggsave(p_tax_cyano_final_perfect, filename = paste0(outwd, "Taxonomy_Cyano_Final_Sharp.pdf"), width = 18, height = 9)
+
+print(p_tax_cyano_final_perfect)
+
+
+# --- Top Genera within 'Other Cyanobacteria ---
+other_cyano_check <- df_cyano_gen_pre_merge %>%
+  filter(!(Genus %in% names(gen_colors))) %>%
+  group_by(Genus) %>%
+  summarise(Mean_Abund_Pct = mean(Abundance) * 100, .groups = 'drop') %>%
+  arrange(desc(Mean_Abund_Pct)) %>%
+  slice_head(n = 5)
+print(other_cyano_check)
+
+
+```
+
+
+
+
+
+
+
+
+# Conclusions 
+
+## PERMANOVA
+
+Statistical analyses indicate that region has a significant effect on community structure.
+
+    Total bacterial community: R² = 0.31  
+    Cyanobacterial community: R² = 0.33  
+
+These results suggest that a substantial proportion of the microbial variation can be explained by geographic location (west, south, and east coast regions). 
+
+The effect of region remains evident even when considering the total bacterial community.
+
+
+
+
+```{r table_of_statistics}
+
+### =========================================================================
+### SUMMARY STATISTICS TABLE
+### =========================================================================
+
+# 1. Compile Alpha Diversity statistics
+# Note: R2 is not applicable for Kruskal-Wallis, so it is set to NA
+stats_summary_alpha <- data.frame(
+  Analysis = c(rep("Alpha (Total)", 3), rep("Alpha (Cyano)", 3)),
+  Metric = rep(c("Observed", "Shannon", "Evenness"), 2),
+  R2 = NA,
+  P_Value = c(kw_obs, kw_sha, kw_eve, kw_obs_cy, kw_sha_cy, kw_eve_cy),
+  Method = "Kruskal-Wallis"
+)
+
+# 2. Compile Beta Diversity statistics (PERMANOVA) including R2 values
+stats_summary_beta <- data.frame(
+  Analysis = c("Beta (Total)", "Beta (Cyano)"),
+  Metric = "Aitchison Dist.",
+  R2 = c(round(permanova_aitchison$R2[1], 3), round(permanova_cy_aitchison$R2[1], 3)),
+  P_Value = c(permanova_aitchison$`Pr(>F)`[1], permanova_cy_aitchison$`Pr(>F)`[1]),
+  Method = "PERMANOVA"
+)
+
+# 3. Merge all statistics and format for the final report
+final_report_table <- rbind(stats_summary_alpha, stats_summary_beta) %>%
+  mutate(
+    # Format P-values: use scientific notation for very small values or round to 4 decimals
+    P_Value = ifelse(P_Value < 0.001, "< 0.001", as.character(round(P_Value, 4))),
+    
+    # Assign significance stars based on P-value thresholds
+    Significance = case_when(
+      P_Value == "< 0.001" ~ "***",
+      as.numeric(P_Value) < 0.01 ~ "**",
+      as.numeric(P_Value) < 0.05 ~ "*",
+      TRUE ~ "ns"
+    ),
+    
+    # Replace NA values in the R2 column with a dash for cleaner presentation
+    R2 = ifelse(is.na(R2), "-", as.character(R2))
+  )
+
+# Render the final table in the document
+knitr::kable(final_report_table, 
+             col.names = c("Analysis", "Metric", "R² (Effect Size)", "p-value", "Method", "Sign."),
+             caption = "Summary of Statistical Tests for Microbial Diversity and Community Structure")
+
+
+```
+
+
+
+
