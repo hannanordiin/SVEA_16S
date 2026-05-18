@@ -21,6 +21,6 @@ The primary sequence processing was performed using the **nf-core/ampliseq (v2.1
 | `taxonomy` | SILVA 138.2 | Reference database |
 
 ## Repository Structure
-- `/scripts`: R-scripts for diversity analysis and visualization.
+- `/scripts`: R-scripts for diversity analysis and visualization. Also python script from geographical map with sampling stations. 
 - `params.json`: Complete record of Nextflow/nf-core parameters.
 - `dardel_job.sh`: SLURM batch script for cluster execution.
