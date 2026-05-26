@@ -1,0 +1,241 @@
+### =========================================================================
+### PART 1: GLOBAL SETUP & DEFINITIONS
+### =========================================================================
+rm(list=ls()) 
+set.seed(12345)
+options(scipen = 999)
+
+# Load packages
+packages <- c("tidyverse", "vegan", "phyloseq", "ggrepel", "RColorBrewer", "ggplot2")
+lapply(packages, require, character.only = TRUE)
+
+# Define input and output directories
+inwd  <- "/Users/hannanordin/Documents/Masterarbete/R_data/dada2_result/"
+outwd <- "/Users/hannanordin/Documents/Masterarbete/R_data/R_outputs/"
+setwd(inwd)
+
+# Define consistent ordering of sampling locations (west → south → east)
+location_order <- c("Släggö", "N14", "Anholt", "Å17", "BY2", "BY5", "BY15", "BY20", "BY38", "REFM1V1")
+
+# Generate color palette for locations
+my_colors <- colorRampPalette(brewer.pal(12, "Paired"))(length(location_order))
+names(my_colors) <- location_order
+
+
+
+
+### =========================================================================
+### PART 2: IMPORT & CLEANING
+### =========================================================================
+
+# Import ASV count table (rows = ASVs, columns = samples)
+asv_table <- read.delim(paste0(inwd, "ASV_table.tsv"), header = TRUE, sep = "\t", row.names = 1)
+
+# Import taxonomic classification (SILVA database)
+taxonomy_silva <- read.delim(paste0(inwd, "ASV_tax_species.silva_138_2.tsv"), header = TRUE, sep = "\t", row.names = 1)
+
+# Import sample metadata (e.g. location, year)
+metadata_Master <- read.delim(paste0(inwd, "Metadata.tsv"), header = TRUE, sep = "\t", row.names = 1, fileEncoding = "UTF-8")
+
+# Import DNA sequences corresponding to each ASV
+asv_seq <- Biostrings::readDNAStringSet(paste0(inwd, "ASV_seqs.fasta"), format = "fasta")
+
+
+
+# Build a phyloseq object integrating ASV abundance data, taxonomy,
+# sample metadata, and DNA sequences. This unified object ensures that
+# all components are consistently linked and enables streamlined
+# downstream ecological and statistical analyses.
+
+ps <- phyloseq(otu_table(asv_table, taxa_are_rows = TRUE), 
+               tax_table(as.matrix(taxonomy_silva)), 
+               sample_data(metadata_Master), refseq(asv_seq))
+
+# Remove non-bacterial sequences (mitochondria and chloroplast contamination)
+ps_all <- subset_taxa(ps, Family != "Mitochondria" & Order != "Chloroplast")
+
+# Prepare and standardize metadata
+sd_all <- data.frame(sample_data(ps_all))
+
+# Ensure correct ordering of locations
+sd_all$Location <- factor(sd_all$Location, levels = location_order)
+
+# Define broader geographic regions
+sd_all$Region <- ifelse(sd_all$Location %in% c("Släggö", "N14", "Anholt", "Å17"), "West",
+                        ifelse(sd_all$Location %in% c("BY2", "BY5"), "South", "East"))
+sample_data(ps_all) <- sample_data(sd_all)
+
+
+
+
+
+### =========================================================================
+### PART 3: ANALYSIS - TOTAL BACTERIAL COMMUNITY (All Taxa)
+### =========================================================================
+
+# --- 1. Rarefaction of all bacteria ---
+
+# Convert OTU table to matrix format
+otu_all <- as(otu_table(ps_all), "matrix")
+
+# Ensure samples are rows for vegan compatibility
+if (taxa_are_rows(ps_all)) { otu_all <- t(otu_all) }
+
+# Generate rarefaction curves to assess sequencing depth
+rare_data_all <- vegan::rarecurve(otu_all, step = 100, tidy = TRUE)
+
+# Merge rarefaction data with metadata
+rare_df_all <- rare_data_all %>%
+  left_join(data.frame(sample_data(ps_all)) %>% mutate(Site = rownames(.)), by = "Site")
+
+# Plot rarefaction curves
+p_rare_all <- ggplot(rare_df_all, aes(x = Sample, y = Species, group = Site, color = Region)) +
+  geom_line(alpha = 0.5) +
+  geom_vline(xintercept = min(sample_sums(ps_all)), linetype = "dashed") +
+  theme_classic() +
+  labs(title = "Rarefaction: All Bacteria (minus debris)", x = "Sequencing Depth", y = "ASVs")
+
+ggsave(p_rare_all, filename = paste0(outwd, "Rarefaction_allbacteria.pdf"), width = 12, height = 7)
+
+print(p_rare_all)
+
+
+
+
+# --- 2. Alpha diversity: total bacterial community (Manual Stats) ---
+
+set.seed(123)
+ps_all_rare <- rarefy_even_depth(ps_all, replace = FALSE, verbose = FALSE)
+
+# Calculate indices
+alpha_measures_all <- estimate_richness(ps_all_rare, measures = c("Observed", "Shannon"))
+alpha_measures_all$Evenness <- alpha_measures_all$Shannon / log(alpha_measures_all$Observed)
+alpha_all <- data.frame(sample_data(ps_all_rare), alpha_measures_all)
+
+# STEP 1: Calculate Kruskal-Wallis p-values manually for each metric
+kw_obs <- kruskal.test(Observed ~ Region, data = alpha_all)$p.value
+kw_sha <- kruskal.test(Shannon ~ Region, data = alpha_all)$p.value
+kw_eve <- kruskal.test(Evenness ~ Region, data = alpha_all)$p.value
+
+# Create a small data frame to hold these p-values for the plot
+stats_labels <- data.frame(
+  Metric = c("Observed", "Shannon", "Evenness"),
+  label = c(paste0("p = ", round(kw_obs, 4)), 
+            paste0("p = ", round(kw_sha, 4)), 
+            paste0("p = ", round(kw_eve, 4)))
+)
+
+# STEP 2: Reshape data for plotting
+alpha_all_long <- alpha_all %>%
+  pivot_longer(cols = c("Observed", "Shannon", "Evenness"), 
+               names_to = "Metric", values_to = "Value")
+
+# STEP 3: Visualize (using geom_text instead of ggpubr)
+p_alpha_total_comp <- ggplot(alpha_all_long, aes(x = Region, y = Value, fill = Region)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 1.5, alpha = 0.5) +
+  facet_wrap(~Metric, scales = "free_y", ncol = 1) +
+  scale_fill_manual(values = c("West" = "blue", "South" = "green", "East" = "red")) +
+  theme_bw() +
+  # Add the p-values manually to the top right of each facet
+  geom_text(data = stats_labels, aes(x = Inf, y = Inf, label = label), 
+            hjust = 1.1, vjust = 1.5, inherit.aes = FALSE, size = 3.5, fontface = "italic") +
+  labs(title = "Total Bacterial Alpha Diversity", 
+       subtitle = "Kruskal-Wallis rank sum test performed for each metric",
+       y = "Index Value")
+
+ggsave(p_alpha_total_comp, filename = paste0(outwd, "Alpha_Comp_Total_ManualStats.pdf"), width = 8, height = 10)
+
+print(p_alpha_total_comp)
+
+
+
+
+# --- 3. Alpha diversity: total bacterial community ---
+
+# Rarefy samples to even sequencing depth for fair diversity comparison
+set.seed(123)
+ps_all_rare <- rarefy_even_depth(ps_all, replace = FALSE)
+
+# Calculate Shannon diversity index (accounts for richness and evenness)
+alpha_old <- data.frame(sample_data(ps_all_rare), estimate_richness(ps_all_rare, measures = "Shannon"))
+
+# Visualize alpha diversity across locations
+p_alpha_total <- ggplot(alpha_old, aes(x = Location, y = Shannon, fill = Location)) +
+  annotate("rect", xmin = 0.5, xmax = 4.5, ymin = -Inf, ymax = Inf, alpha = 0.1, fill = "blue") + 
+  annotate("rect", xmin = 4.5, xmax = 6.5, ymin = -Inf, ymax = Inf, alpha = 0.1, fill = "green") +
+  annotate("rect", xmin = 6.5, xmax = 10.5, ymin = -Inf, ymax = Inf, alpha = 0.1, fill = "red") +
+  geom_boxplot(alpha = 0.8, color = "black", outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 2, alpha = 0.7) +
+  scale_fill_manual(values = my_colors) + theme_bw() +
+  labs(title = "Total Bacterial Diversity (All Taxa)", subtitle = "Every station included") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(p_alpha_total, filename = paste0(outwd, "Alpha_diversity_regions_allbacteria.pdf"), width = 12, height = 7)
+
+print(p_alpha_total)
+
+
+# Kruskal-Wallis results for the total bacterial community
+cat("--- KRUSKAL-WALLIS RESULTS: TOTAL COMMUNITY ---\n")
+print(kruskal.test(Observed ~ Region, data = alpha_all))
+print(kruskal.test(Shannon ~ Region, data = alpha_all))
+print(kruskal.test(Evenness ~ Region, data = alpha_all))
+
+
+
+library(dplyr)
+
+# Exact medians for total bacterial community
+table_total_medians <- alpha_all %>%
+  group_by(Region) %>%
+  summarise(
+    Median_Observed = round(median(Observed, na.rm = TRUE), 1),
+    Median_Shannon  = round(median(Shannon, na.rm = TRUE), 2),
+    Median_Evenness = round(median(Evenness, na.rm = TRUE), 2)
+  )
+print("--- TOTAL COMMUNITY MEDIANS ---")
+print(table_total_medians)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# 2. Exact medians for Cyanobacteria
+table_cyano_medians <- alpha_cy_stats %>%
+  group_by(Region) %>%
+  summarise(
+    Median_Observed = round(median(Observed, na.rm = TRUE), 1),
+    Median_Shannon  = round(median(Shannon, na.rm = TRUE), 2),
+    Median_Evenness = round(median(Evenness, na.rm = TRUE), 2)
+  )
+print("--- CYANOBACTERIA MEDIANS ---")
+print(table_cyano_medians)
+
+
+
+
+
+
+
+
+
